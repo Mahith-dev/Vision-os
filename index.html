@@ -230,9 +230,10 @@
         baseOptions: { modelAssetPath: MODELS.hand, delegate: "GPU" },
         runningMode: "VIDEO", 
         numHands: 2,
-        minHandDetectionConfidence: 0.7,  // Wait for clear view to detect
-        minHandPresenceConfidence: 0.7,   // Drop ghost hands instantly
-        minTrackingConfidence: 0.8        // High tracking confidence kills micro-jitter
+        // Drop these back to 0.5 so it stays in the ultra-fast temporal tracking loop
+        minHandDetectionConfidence: 0.5,  
+        minHandPresenceConfidence: 0.5,   
+        minTrackingConfidence: 0.5        
       }),
       pose: async () => await PoseLandmarker.createFromOptions(vision, {
         baseOptions: { modelAssetPath: MODELS.pose, delegate: "GPU" },
