@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VISION_OS // MEDIAPIPE DEMO</title>
+  
+  <style>
+    :root {
+      --term-color: #00ff41;
+      --term-bg: #030a05;
+      --term-border: 1px solid #00ff41;
+      --term-dim: rgba(0, 255, 65, 0.2);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    body {
+      background-color: var(--term-bg);
+      color: var(--term-color);
+      font-family: ui-monospace, "Courier New", Courier, monospace;
+      overflow: hidden;
+      font-size: 13px;
+    }
+
+    #media-layer {
+      position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+      z-index: 1; display: flex; justify-content: center; align-items: center;
+      background: #000;
+    }
+
+    #webcam {
+      position: absolute; width: 100%; height: 100%; object-fit: cover;
+      transform: scaleX(-1); /* Keep the camera feed mirrored */
+    }
+
+    #overlay {
+      position: absolute; width: 100%; height: 100%; object-fit: cover;
+      z-index: 2;
+      /* Removed scaleX(-1) so text renders correctly. Coordinates are flipped manually in JS. */
+    }
+
+    #ui-layer {
+      position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+      z-index: 10; pointer-events: none; display: flex;
+      flex-direction: column; justify-content: space-between; padding: 20px;
+    }
+
+    .panel {
+      background: rgba(3, 10, 5, 0.85); border: var(--term-border);
+      padding: 15px; pointer-events: auto; box-shadow: 0 0 10px var(--term-dim);
+    }
+
+    .header {
+      font-weight: bold; margin-bottom: 15px; border-bottom: var(--term-border);
+      padding-bottom: 5px; letter-spacing: 2px;
+    }
+
+    .controls { display: flex; flex-direction: column; gap: 10px; width: 300px; }
+
+    button.toggle {
+      background: transparent; color: var(--term-color); border: var(--term-border);
+      padding: 8px 12px; text-align: left; font-family: inherit; font-size: 12px;
+      cursor: pointer; text-transform: uppercase; transition: background 0.1s, color 0.1s;
+    }
+    button.toggle:hover { background: var(--term-dim); }
+    button.toggle.active { background: var(--term-color); color: var(--term-bg); font-weight: bold; }
+    button.toggle:disabled { border-color: #333; color: #555; cursor: not-allowed; }
+
+    #terminal { width: 450px; height: 200px; overflow-y: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+    #log-content { display: flex; flex-direction: column; gap: 4px; }
+    .log-line { animation: type 0.1s ease-out forwards; }
+    .log-line.warn { color: #ffeb3b; }
+    .log-line.err { color: #f44336; }
+
+    .crosshair {
+      position: absolute; top: 50%; left: 50%; width: 40px; height: 40px;
+      transform: translate(-50%, -50%); border: 1px solid rgba(0, 255, 65, 0.4); z-index: 5;
+    }
+    .crosshair::before, .crosshair::after { content: ''; position: absolute; background: rgba(0, 255, 65, 0.4); }
+    .crosshair::before { top: 50%; left: -10px; right: -10px; height: 1px; }
+    .crosshair::after { left: 50%; top: -10px; bottom: -10px; width: 1px; }
+  </style>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.12/+esm"
+      }
+    }
+  </script>
+</head>
+<body>
+
+  <div id="media-layer">
+    <video id="webcam" autoplay playsinline></video>
+    <canvas id="overlay"></canvas>
+    <div class="crosshair"></div>
+  </div>
+
+  <div id="ui-layer">
+    <div class="panel controls">
+      <div class="header">VISION_OS // MODULE_CONTROL</div>
+      <button id="btn-face" class="toggle">[ ] FACE_LANDMARKER</button>
+      <button id="btn-hand" class="toggle">[ ] HAND_LANDMARKER</button>
+      <button id="btn-pose" class="toggle">[ ] POSE_LANDMARKER</button>
+      <button id="btn-gesture" class="toggle">[ ] GESTURE_RECOGNIZER</button>
+      <button id="btn-object" class="toggle">[ ] OBJECT_DETECTOR</button>
+    </div>
+
+    <div class="panel" id="terminal">
+      <div class="header">SYSTEM_LOG</div>
+      <div id="log-content"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    import {
+      FilesetResolver, FaceLandmarker, HandLandmarker, PoseLandmarker,
+      GestureRecognizer, ObjectDetector, DrawingUtils
+    } from "@mediapipe/tasks-vision";
+
+    // =========================================================================
+    // 1. SYSTEM STATE & UPGRADED MODELS
+    // =========================================================================
+    const MODELS = {
+      face: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      hand: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      pose: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task", // Upgraded to FULL model for stability
+      gesture: "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
+      object: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite"
+    };
+
+    const tasks = { face: null, hand: null, pose: null, gesture: null, object: null };
+    const active = { face: false, hand: false, pose: false, gesture: false, object: false };
+    
+    let vision = null, drawingUtils = null;
+    const video = document.getElementById("webcam");
+    const canvas = document.getElementById("overlay");
+    const ctx = canvas.getContext("2d");
+
+    // =========================================================================
+    // 2. TERMINAL LOGGER
+    // =========================================================================
+    const logBox = document.getElementById("log-content");
+    function log(msg, type = "info") {
+      const line = document.createElement("div");
+      line.className = `log-line ${type}`;
+      line.innerText = `[${new Date().toISOString().substring(11, 23)}] > ${msg}`;
+      logBox.appendChild(line);
+      if (logBox.childElementCount > 10) logBox.removeChild(logBox.firstChild);
+    }
+
+    // =========================================================================
+    // 3. INITIALIZATION
+    // =========================================================================
+    async function bootSystem() {
+      log("Initializing hardware interfaces...");
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+        video.srcObject = stream;
+        
+        video.addEventListener("loadeddata", () => {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          drawingUtils = new DrawingUtils(ctx);
+          log("Webcam established. Resolution: " + video.videoWidth + "x" + video.videoHeight);
+          requestAnimationFrame(renderLoop);
+        });
+
+        log("Fetching WASM FilesetResolver...");
+        vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.12/wasm");
+        log("Base vision engine online. Awaiting module activation.");
+        
+        setupControls();
+      } catch (err) {
+        log("CRITICAL ERROR: " + err.message, "err");
+      }
+    }
+
+    // =========================================================================
+    // 4. LAZY LOADERS (WITH STABILITY THRESHOLDS)
+    // =========================================================================
+    const Loaders = {
+      face: async () => await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: MODELS.face, delegate: "GPU" },
+        runningMode: "VIDEO", numFaces: 1
+      }),
+      hand: async () => await HandLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: MODELS.hand, delegate: "GPU" },
+        runningMode: "VIDEO", numHands: 2
+      }),
+      pose: async () => await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: MODELS.pose, delegate: "GPU" },
+        runningMode: "VIDEO", numPoses: 1, 
+        minPoseDetectionConfidence: 0.6,
+        minPosePresenceConfidence: 0.6,
+        minTrackingConfidence: 0.6
+      }),
+      gesture: async () => await GestureRecognizer.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: MODELS.gesture, delegate: "GPU" },
+        runningMode: "VIDEO", numHands: 2
+      }),
+      
+      // Force the Object Detector to use the CPU delegate
+      object: async () => await ObjectDetector.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: MODELS.object, delegate: "CPU" }, 
+        runningMode: "VIDEO", scoreThreshold: 0.4
+      })
+    };
+
+    // =========================================================================
+    // 5. EVENT BINDINGS
+    // =========================================================================
+    function setupControls() {
+      ["face", "hand", "pose", "gesture", "object"].forEach(key => {
+        const btn = document.getElementById(`btn-${key}`);
+        btn.addEventListener("click", async () => {
+          if (active[key]) {
+            active[key] = false;
+            btn.classList.remove("active");
+            btn.innerText = `[ ] ${key.toUpperCase()}`;
+            log(`Disabled ${key.toUpperCase()} module.`);
+            return;
+          }
+
+          if (!tasks[key]) {
+            btn.disabled = true;
+            btn.innerText = `[...] DOWNLOADING...`;
+            log(`Allocating memory for ${key.toUpperCase()}...`, "warn");
+            const start = performance.now();
+            tasks[key] = await Loaders[key]();
+            log(`Compiled ${key.toUpperCase()} in ${(performance.now() - start).toFixed(0)}ms.`);
+            btn.disabled = false;
+          }
+
+          active[key] = true;
+          btn.classList.add("active");
+          btn.innerText = `[X] ${key.toUpperCase()}`;
+          log(`Enabled ${key.toUpperCase()} module.`);
+        });
+      });
+    }
+
+    // =========================================================================
+    // 6. RENDER ENGINE (Split into Mirrored vs Unmirrored passes)
+    // =========================================================================
+    let lastVideoTime = -1;
+
+    function renderLoop() {
+      requestAnimationFrame(renderLoop);
+      if (video.readyState < 2) return;
+
+      const startTimeMs = performance.now();
+      
+      if (video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Fetch all active inferences
+        const resFace = active.face && tasks.face ? tasks.face.detectForVideo(video, startTimeMs) : null;
+        const resHand = active.hand && tasks.hand ? tasks.hand.detectForVideo(video, startTimeMs) : null;
+        const resPose = active.pose && tasks.pose ? tasks.pose.detectForVideo(video, startTimeMs) : null;
+        const resGest = active.gesture && tasks.gesture ? tasks.gesture.recognizeForVideo(video, startTimeMs) : null;
+        const resObj = active.object && tasks.object ? tasks.object.detectForVideo(video, startTimeMs) : null;
+
+        const pointStyle = { color: "#00ff41", radius: 2, lineWidth: 1 };
+        const lineStyle  = { color: "rgba(0, 255, 65, 0.4)", lineWidth: 1 };
+        const alertStyle = { color: "#ffb000", radius: 3 };
+
+        // -----------------------------------------------------------
+        // PASS 1: MIRRORED DRAWING (For MediaPipe Skeletons)
+        // -----------------------------------------------------------
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.translate(-canvas.width, 0);
+
+        if (resFace?.faceLandmarks) {
+          for (const lm of resFace.faceLandmarks) {
+            drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_TESSELATION, { color: "rgba(0, 255, 65, 0.15)", lineWidth: 0.5 });
+            drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE, pointStyle);
+            drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_LEFT_EYE, pointStyle);
+            drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_FACE_OVAL, lineStyle);
+          }
+        }
+        if (resHand?.landmarks) {
+          for (const lm of resHand.landmarks) {
+            drawingUtils.drawConnectors(lm, HandLandmarker.HAND_CONNECTIONS, lineStyle);
+            drawingUtils.drawLandmarks(lm, pointStyle);
+          }
+        }
+        if (resPose?.landmarks) {
+          for (const lm of resPose.landmarks) {
+            drawingUtils.drawConnectors(lm, PoseLandmarker.POSE_CONNECTIONS, lineStyle);
+            drawingUtils.drawLandmarks(lm, alertStyle);
+          }
+        }
+        if (resGest?.landmarks) {
+          for (const lm of resGest.landmarks) {
+            drawingUtils.drawConnectors(lm, HandLandmarker.HAND_CONNECTIONS, { color: "rgba(255, 176, 0, 0.4)", lineWidth: 1 });
+          }
+        }
+
+        ctx.restore(); // Return to normal unmirrored context for text and boxes
+
+        // -----------------------------------------------------------
+        // PASS 2: UNMIRRORED DRAWING (For Text & Bounding Boxes)
+        // -----------------------------------------------------------
+        
+        // Gesture Text
+        if (resGest?.landmarks) {
+          ctx.fillStyle = "#ffb000";
+          ctx.font = "16px monospace";
+          for (let i = 0; i < resGest.landmarks.length; i++) {
+            const wrist = resGest.landmarks[i][0];
+            const gesture = resGest.gestures[i][0];
+            
+            // Mathematically flip the X coordinate to match the mirrored video
+            const mirroredX = (1.0 - wrist.x) * canvas.width; 
+            const y = (wrist.y * canvas.height) - 20;
+            
+            ctx.fillText(`[${gesture.categoryName}] ${(gesture.score * 100).toFixed(0)}%`, mirroredX, y);
+          }
+        }
+
+        // Object Detection Boxes & Text
+        if (resObj?.detections) {
+          ctx.strokeStyle = "#00ff41";
+          ctx.lineWidth = 1.5;
+          ctx.font = "14px monospace";
+          
+          for (const det of resObj.detections) {
+            const bbox = det.boundingBox;
+            const cat = det.categories[0];
+            
+            // Mathematically flip the X bounding box origin
+            const mirroredX = canvas.width - bbox.originX - bbox.width;
+            
+            ctx.strokeRect(mirroredX, bbox.originY, bbox.width, bbox.height);
+            
+            const text = `${cat.categoryName.toUpperCase()} [${(cat.score * 100).toFixed(0)}%]`;
+            const textWidth = ctx.measureText(text).width;
+            
+            ctx.fillStyle = "#00ff41";
+            ctx.fillRect(mirroredX, bbox.originY - 20, textWidth + 10, 20);
+            
+            ctx.fillStyle = "#000";
+            ctx.fillText(text, mirroredX + 5, bbox.originY - 5);
+          }
+        }
+      }
+    }
+
+    bootSystem();
+  </script>
+</body>
+</html>
